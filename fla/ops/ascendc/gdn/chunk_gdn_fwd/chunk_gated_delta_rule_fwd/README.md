@@ -32,8 +32,8 @@ A5 依次调度 `ChunkGatedDeltaRuleFwdPrepare`、`ChunkFwdH` 和 `ChunkFwdO`，
 | `q` | 必选 | 由 `layout` 决定；FP16/BF16 | Query |
 | `k` | 必选 | 与 q 同 shape/dtype | Key |
 | `v` | 必选 | 由 `layout` 决定；与 q 同 dtype | Value |
-| `g` | 必选 | `[B,T,Hv]`；FP32 或与 q 同 dtype | 门控值，固定为 sequence-major |
-| `beta` | 必选 | 与 g 同 shape；FP32 或与 q 同 dtype | Delta 系数 |
+| `g` | 必选 | 默认 `[B,T,Hv]`；chunkSize=32 额外接受 `[B,Hv,T]`；FP32 或与 q 同 dtype | 门控值；head-major 输入可避免 ACLNN 内部转置 |
+| `beta` | 必选 | 与 g 使用相同 layout；FP32 或与 q 同 dtype | Delta 系数 |
 | `aLogOptional` | 当前未支持 | - | 扩展接口预留，必须为空 |
 | `dtBiasOptional` | 当前未支持 | - | 扩展接口预留，必须为空 |
 | `initialStateOptional` | 可选 | `stateVFirst=false` 时为 `[N,Hv,K,V]`，否则为 `[N,Hv,V,K]`；FP32 或与 q 同 dtype | 初始状态 |
@@ -69,8 +69,11 @@ q_hat/k_hat 是原始 q/k 的别名，两个 rstd 为 None。`chunkSize=32` 不�
 h 的 shape 为 dense `[B,NT,Hv,K,V]`，带 cu_seqlens 的 packed 为 `[1,total_NT,Hv,K,V]`；
 `state_v_first=True` 时末两维为 `[V,K]`。A5 prepare 路径导出遵循此契约，旧融合路径仍不导出 h。
 
-`g/beta` 固定以 BSN 输入，在 ACLNN 内转为 BNS；任一输入为 FP32 时，
-另一个先提升为 FP32。两个输入均为主 dtype 时保留该 dtype，后续分支支持范围不变。
+`g/beta` 默认以 BSN 输入，在 ACLNN 内转为 BNS。A5 chunkSize=32 推理路径也接受已经连续的
+BNS `[B,Hv,T]` 输入并直接下发，避免两次数据搬运；二者必须使用相同 layout。为保持既有接口
+兼容，当 `T == Hv` 导致两种 shape 无法区分时按旧的 BSN 语义处理，调用方不得传入 BNS。
+任一输入为 FP32 时，另一个先提升为 FP32。两个输入均为主 dtype 时保留该 dtype，后续分支
+支持范围不变。
 Python 接受 `a_log=None, dt_bias=None` 预留参数；当前仅支持
 `use_gate_in_kernel=False`，非空 a_log/dt_bias 或启用 gate 均报错。
 
@@ -94,7 +97,7 @@ Python 接受 `a_log=None, dt_bias=None` 预留参数；当前仅支持
 - A2（`ascend910b`）、A3（`ascend910_93`）、A5（`ascend950`）。
 - 原 Phase6 路径支持 FP16、BF16，`K=128`、`V=128/256`、`chunkSize=64/128`。
 - A5 三算子路径支持 `useExp2=true/false`、`useQkL2norm=true/false`、BF16、`K=V=128`、`chunkSize=64`、`Hv/Hk in {1,2,3,4}`。
-- `chunkSize=32` 仅 A5，走独立融合 kernel。限制为 BF16 的 q/k/v/beta/o、FP32 的 g、`K=V=128`，并且必须 `useExp2=false`、`useQkL2norm=true`、核内 beta sigmoid。`allowNegEigval` 与 `stateVFirst` 均可为 true/false；前者为 true 时使用 `2*sigmoid(beta)`。layout 支持 `BNSD/BSND/NTD/TND`：BSND/TND 的 q/k/v 在 ACLNN 转为 head-major 后进核，g/beta 由 `[B,T,Hv]` 转为 `[B,Hv,T]` 后进核，o 固定 BSND。aLog/dtBias 必须为空。稳定入口仍返回十元组。支持 MHA、GVA（`Hv` 能被 `Hk` 整除）、定长和变长，变长要求物理 `B=1`。初始状态可选，dtype 为 BF16 或 FP32：无初始状态或 FP32 初始状态时最终状态为 FP32，BF16 初始状态时最终状态为 BF16。
+- `chunkSize=32` 仅 A5，走独立融合 kernel。限制为 BF16 的 q/k/v/beta/o、FP32 的 g、`K=V=128`，并且必须 `useExp2=false`、`useQkL2norm=true`、核内 beta sigmoid。`allowNegEigval` 与 `stateVFirst` 均可为 true/false；前者为 true 时使用 `2*sigmoid(beta)`。layout 支持 `BNSD/BSND/NTD/TND`：BSND/TND 的 q/k/v 在 ACLNN 转为 head-major 后进核；g/beta 可由 ACLNN 将 `[B,T,Hv]` 转为 `[B,Hv,T]`，也可由调用方直接提供连续 `[B,Hv,T]`，o 固定 BSND。aLog/dtBias 必须为空。稳定入口仍返回十元组。支持 MHA、GVA（`Hv` 能被 `Hk` 整除）、定长和变长，变长要求物理 `B=1`。初始状态可选，dtype 为 BF16 或 FP32：无初始状态或 FP32 初始状态时最终状态为 FP32，BF16 初始状态时最终状态为 BF16。
 - 支持 MHA、GVA、定长和变长序列。
 - A2/A3 使用 `arch22` 私有实现，A5 使用 `arch35` 私有实现；两套架构代码隔离维护。
 

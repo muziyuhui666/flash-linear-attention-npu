@@ -27,7 +27,17 @@ atk case -f chunk_gated_delta_rule_fwd_chunk32.yaml \
 
 执行器是 `executor_chunk_gated_delta_rule_fwd_chunk32.py`。NPU 侧是 DUT，CPU 侧只认 `mixed_tolerance_bm`。
 
-十元组里，`disable_recompute=false` 时 g_cumsum、A、q_hat、k_hat 和两个 rstd 是 None。`true` 时这几项都导出。`beta_eff` 在 chunkSize=32 上总会导出。h 只看 `out_h`。
+十元组里，`disable_recompute=false` 时 g_cumsum、A、q_hat、k_hat 和两个 rstd 是 None。`true` 时这几项都导出。`beta_eff` 默认随核内 sigmoid 导出；推理调用方可显式关闭未消费的输出。h 只看 `out_h`。
+
+## Head-major 门控输入
+
+`chunk_size=32` 的公开入口保持既有 `[B,T,Hv]` g/beta 输入，同时增加连续
+`[B,Hv,T]` 输入支持。两者必须采用相同 layout；head-major 形式直接进入 A5 kernel，
+不再生成两次 `BTH -> BHT` Transpose。当 `T == Hv` 时 shape 无法区分，为兼容旧调用方
+只按 `[B,T,Hv]` 解释。
+
+变更验收包括：旧 BTH 全量回归、BHT 与 BTH 的同输入数值对照、`T=Hv` 兼容边界、
+模型 shape `B=1,Hk=8,Hv=24,T=4096,K=V=128` 的性能与运行时路径记录。
 
 ## 环境变量
 

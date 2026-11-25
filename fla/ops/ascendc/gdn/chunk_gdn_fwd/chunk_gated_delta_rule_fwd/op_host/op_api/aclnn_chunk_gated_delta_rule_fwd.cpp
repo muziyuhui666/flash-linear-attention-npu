@@ -575,6 +575,12 @@ static aclnnStatus CheckChunk32Params(const ChunkGatedDeltaRuleFwdParams &params
     const int64_t keyDim = Dim(params.q, 3);
     const int64_t valueHeads = sequenceMajor ? Dim(params.v, 2) : Dim(params.v, 1);
     const int64_t valueDim = Dim(params.v, 3);
+    const bool sequenceGate =
+        HasShape(params.g, {batch, tokens, valueHeads}) &&
+        HasShape(params.beta, {batch, tokens, valueHeads});
+    const bool headGate =
+        HasShape(params.g, {batch, valueHeads, tokens}) &&
+        HasShape(params.beta, {batch, valueHeads, tokens});
     CHECK_COND(batch > 0 && keyHeads > 0 && valueHeads > 0 && tokens > 0 &&
                    valueHeads % keyHeads == 0 &&
                    keyDim == HEAD_DIM_128 && valueDim == HEAD_DIM_128,
@@ -585,11 +591,11 @@ static aclnnStatus CheckChunk32Params(const ChunkGatedDeltaRuleFwdParams &params
                        HasShape(params.v, {batch, tokens, valueHeads, valueDim}))
                     : (HasShape(params.k, {batch, keyHeads, tokens, keyDim}) &&
                        HasShape(params.v, {batch, valueHeads, tokens, valueDim}))) &&
-                   HasShape(params.g, {batch, tokens, valueHeads}) &&
-                   HasShape(params.beta, {batch, tokens, valueHeads}) &&
+                   (sequenceGate || headGate) &&
                    HasShape(params.oOut, {batch, tokens, valueHeads, valueDim}),
                ACLNN_ERR_PARAM_INVALID,
-               "chunkSize=32 expects q/k/v in the requested layout, g/beta as [B,T,Hv], "
+               "chunkSize=32 expects q/k/v in the requested layout, matching g/beta as "
+               "[B,T,Hv] or [B,Hv,T], "
                "and o as BSND [B,T,Hv,V].");
     if (params.qHatOutOptional != nullptr) {
         const bool hatShape = sequenceMajor
@@ -911,14 +917,26 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const int64_t hv = sequenceMajor ? Dim(params.v, 2) : Dim(params.v, 1);
         const int64_t kDim = Dim(params.q, 3);
         const int64_t vDim = Dim(params.v, 3);
+        const int64_t seqlen = sequenceMajor ? Dim(params.q, 1) : Dim(params.q, 2);
+        // When T == Hv both accepted layouts have the same shape. Preserve the
+        // original BTH interpretation in that ambiguous case.
+        const bool sequenceGate =
+            HasShape(params.g, {batch, seqlen, hv}) &&
+            HasShape(params.beta, {batch, seqlen, hv});
+        const bool gatesHeadMajor =
+            !sequenceGate &&
+            HasShape(params.g, {batch, hv, seqlen}) &&
+            HasShape(params.beta, {batch, hv, seqlen});
         const aclTensor *qHead = sequenceMajor ? TransposeContiguous(params.q, {0, 2, 1, 3}, executorPtr)
                                                : params.q;
         const aclTensor *kHead = sequenceMajor ? TransposeContiguous(params.k, {0, 2, 1, 3}, executorPtr)
                                                : params.k;
         const aclTensor *vHead = sequenceMajor ? TransposeContiguous(params.v, {0, 2, 1, 3}, executorPtr)
                                                : params.v;
-        const aclTensor *gBht = TransposeContiguous(params.g, {0, 2, 1}, executorPtr);
-        const aclTensor *betaBht = TransposeContiguous(params.beta, {0, 2, 1}, executorPtr);
+        const aclTensor *gBht =
+            gatesHeadMajor ? params.g : TransposeContiguous(params.g, {0, 2, 1}, executorPtr);
+        const aclTensor *betaBht =
+            gatesHeadMajor ? params.beta : TransposeContiguous(params.beta, {0, 2, 1}, executorPtr);
         const int64_t seqNum = SeqNum(params, batch);
         const DataType stateDtype =
             params.initialStateOptional == nullptr
@@ -932,7 +950,6 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
                       MakeShape({seqNum, hv, stateDim0, stateDim1}),
                       stateDtype, Format::FORMAT_ND)
                 : params.finalStateOutOptional;
-        const int64_t seqlen = sequenceMajor ? Dim(params.q, 1) : Dim(params.q, 2);
         const bool exportGA = params.gCumsumOutOptional != nullptr;
         const bool exportBeta = params.betaEffOutOptional != nullptr;
         const bool exportH = params.hOutOptional != nullptr;
