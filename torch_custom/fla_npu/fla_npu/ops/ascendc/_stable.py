@@ -1527,6 +1527,7 @@ def npu_chunk_gated_delta_rule_fwd(q, k, v, g, beta, *, initial_state=None,
                                    use_qk_l2norm_in_kernel=False,
                                    use_gate_in_kernel=False,
                                    use_beta_sigmoid_in_kernel=False,
+                                   output_beta_eff=None,
                                    allow_neg_eigval=False,
                                    disable_recompute=True,
                                    return_intermediate_states=False,
@@ -1539,12 +1540,15 @@ def npu_chunk_gated_delta_rule_fwd(q, k, v, g, beta, *, initial_state=None,
     g_cumsum and A. q_hat and k_hat are allocated when the kernel normalises,
     and are the caller's own q/k when chunk 64/128 leaves normalisation off.
 
-    ``h`` follows ``return_intermediate_states``. ``beta_eff`` follows
-    ``use_beta_sigmoid_in_kernel``. Neither waits on ``disable_recompute``.
+    ``h`` follows ``return_intermediate_states``. By default ``beta_eff``
+    follows ``use_beta_sigmoid_in_kernel`` for backwards compatibility. An
+    inference-only caller that does not consume it can pass
+    ``output_beta_eff=False`` to avoid materialising that optional output.
 
     Chunk 32 runs L2 and beta sigmoid inside the kernel. It requires
     ``use_exp2=False``, ``use_qk_l2norm_in_kernel=True`` and
-    ``use_beta_sigmoid_in_kernel=True``, so ``beta_eff`` is always returned.
+    ``use_beta_sigmoid_in_kernel=True``. This does not require exporting
+    ``beta_eff`` when the caller does not use it.
     """
 
     # Gate-in-kernel is unsupported by this kernel build, and the reference
@@ -1577,13 +1581,16 @@ def npu_chunk_gated_delta_rule_fwd(q, k, v, g, beta, *, initial_state=None,
             "while gate-in-kernel is unsupported.")
     if scale is None:
         scale = float(k.shape[-1]) ** -0.5
+    if output_beta_eff is None:
+        output_beta_eff = bool(use_beta_sigmoid_in_kernel)
     return _op("npu_chunk_gated_delta_rule_fwd")(
         q, k, v, g, beta, initial_state,
         _host_ints(cu_seqlens), _host_ints(chunk_indices),
         _char_code("npu_chunk_gated_delta_rule_fwd", "layout", layout),
         float(scale), chunk_size, bool(use_exp2),
         bool(use_qk_l2norm_in_kernel),
-        bool(use_beta_sigmoid_in_kernel), bool(allow_neg_eigval),
+        bool(use_beta_sigmoid_in_kernel), bool(output_beta_eff),
+        bool(allow_neg_eigval),
         bool(disable_recompute), bool(output_final_state),
         bool(return_intermediate_states), bool(state_v_first),
         _current_stream_ptr(),

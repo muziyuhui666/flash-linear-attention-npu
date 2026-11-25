@@ -61,7 +61,8 @@ constexpr const char* kSchema_chunk_gated_delta_rule_fwd =
     "Tensor beta, Tensor? initial_state, Tensor? cu_seqlens, "
     "Tensor? chunk_indices, int layout, float scale, int chunk_size, "
     "bool use_exp2, bool use_qk_l2norm_in_kernel, "
-    "bool use_beta_sigmoid_in_kernel, bool allow_neg_eigval, "
+    "bool use_beta_sigmoid_in_kernel, bool output_beta_eff, "
+    "bool allow_neg_eigval, "
     "bool disable_recompute, bool output_final_state, "
     "bool return_intermediate_states, bool state_v_first, int stream) "
     "-> (Tensor, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?, "
@@ -77,7 +78,8 @@ run_npu_chunk_gated_delta_rule_fwd(
     std::optional<Tensor> cu_seqlens, std::optional<Tensor> chunk_indices,
     int64_t layout, double scale, int64_t chunk_size, bool use_exp2,
     bool use_qk_l2norm_in_kernel, bool use_beta_sigmoid_in_kernel,
-    bool allow_neg_eigval, bool disable_recompute, bool output_final_state,
+    bool output_beta_eff, bool allow_neg_eigval, bool disable_recompute,
+    bool output_final_state,
     bool return_intermediate_states, bool state_v_first, int64_t stream) {
   namespace layout_math = fla_npu_stable::stable::layout_math;
   const TensorMeta q_meta = meta_of(q);
@@ -116,7 +118,7 @@ run_npu_chunk_gated_delta_rule_fwd(
         state_dtype, q_meta);
   }
   std::optional<Tensor> out_beta_eff;
-  if (use_beta_sigmoid_in_kernel) {
+  if (use_beta_sigmoid_in_kernel && output_beta_eff) {
     out_beta_eff =
         allocate_sizes({batch, tokens, heads}, kFloat, meta_of(beta));
   }
